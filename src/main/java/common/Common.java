@@ -6,6 +6,7 @@
  */
 package common;
 
+import com.google.common.base.Strings;
 import com.strongkey.appliance.entitybeans.Configurations;
 import com.strongkey.appliance.utilities.applianceCommon;
 import com.strongkey.appliance.utilities.applianceMaps;
@@ -257,91 +258,14 @@ public class Common {
         putTransportsMap();
     }
 
-    /**
-     * Gets the location where the SKCE software is installed on this server.
-     *
-     * @return String File-system location where Cryptolib is installed
-     */
-    public static String getSkfeHome() {
-        return skfshome;
-    }
+    public static String getProperty(String name) {
+        String result = System.getProperty(name);
 
-    /*
-    ************************************************************************
- .d8888b.                     .d888 d8b                                    888    d8b
-d88P  Y88b                   d88P"  Y8P                                    888    Y8P
-888    888                   888                                           888
-888         .d88b.  88888b.  888888 888  .d88b.  888  888 888d888  8888b.  888888 888  .d88b.  88888b.  .d8888b
-888        d88""88b 888 "88b 888    888 d88P"88b 888  888 888P"       "88b 888    888 d88""88b 888 "88b 88K
-888    888 888  888 888  888 888    888 888  888 888  888 888     .d888888 888    888 888  888 888  888 "Y8888b.
-Y88b  d88P Y88..88P 888  888 888    888 Y88b 888 Y88b 888 888     888  888 Y88b.  888 Y88..88P 888  888      X88
- "Y8888P"   "Y88P"  888  888 888    888  "Y88888  "Y88888 888     "Y888888  "Y888 888  "Y88P"  888  888  88888P'
-                                             888
-                                        Y8b d88P
-                                         "Y88P"
-    ************************************************************************
-     */
-    /**
-     * Gets the value of the property with the specified key from either the
-     * SKFS_HOME home-directory - if the property file exists there - or from
-     * the system-wide properties file.
-     *
-     * Additionally, if property-value has the $SKFS_HOME variable embedded in
-     * it, then it replaces the variable with the actual value of SKFS_HOME in
-     * the property-value and returns it.
-     *
-     * @param key - The key in the resource file
-     * @return String - The value of the specified key from the resource file
-     */
-    public static String getConfigurationProperty(String key) {
-        if (skcehrb != null) {
-            try {
-                String s = skcehrb.getString(key);
-                if (s.startsWith("SKFS_HOME")) {
-                    return s.replaceFirst("SKFS_HOME", skfshome);
-                } else {
-                    return s;
-                }
-            } catch (java.util.MissingResourceException ex) {
-                // Do nothing
-            }
+        if (Strings.isNullOrEmpty(result)) {
+            throw new IllegalArgumentException(String.format("Property %s could not be found.", name));
         }
 
-        String s = defaultSKFEConfig.getString(key);
-        if (s.startsWith("SKFS_HOME")) {
-            return s.replaceFirst("SKFS_HOME", skfshome);
-        } else {
-            return s;
-        }
-    }
-
-    /**
-     * Gets the value of the property for the specified domain with the
-     * specified key from either the Configuration map or the default Properties
-     * object (if not found in the configuration map).
-     *
-     * @param did - Long value of the domain ID
-     * @param k - The key in the configuration property map
-     * @return String - The value of the specified key
-     */
-    public static String getConfigurationProperty(Long did, String k) {
-        SKFSLogger.logp(SKFSConstants.SKFE_LOGGER, Level.FINE, classname, "getConfigurationProperty", "SKCE-MSG-1056", did + "-" + k);
-
-        // First check for the domain in the configmap
-        if (skfsconfigmap.containsKey(did)) {
-            SKFSLogger.logp(SKFSConstants.SKFE_LOGGER, Level.FINE, classname, "getConfigurationProperty", "SKCE-MSG-1057", did);
-            Map m = skfsconfigmap.get(did);
-            SKFSLogger.logp(SKFSConstants.SKFE_LOGGER, Level.FINE, classname, "getConfigurationProperty", "SKCE-MSG-1058", k + " [DID=" + did + "]");
-            if (m != null) {
-                if (m.containsKey(k)) {
-                    return (String) m.get(k);
-                }
-            }
-        }
-
-        // Default - in case returned map and DB have no value with the key k
-        SKFSLogger.logp(SKFSConstants.SKFE_LOGGER, Level.FINE, classname, "getConfigurationProperty", "SKCE-MSG-1059", k + " [DID=" + did + ", KEY=" + k + ", VALUE=" + getConfigurationProperty(k) + "]");
-        return getConfigurationProperty(k);
+        return result;
     }
 
     public static boolean isConfigurationMapped(Long did) {
