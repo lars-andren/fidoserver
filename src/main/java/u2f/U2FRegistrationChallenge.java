@@ -14,9 +14,9 @@ public class U2FRegistrationChallenge extends U2FChallenge implements Serializab
 
     private String nonce;
 
-    public U2FRegistrationChallenge(String u2fversion, String username) throws Exception {
+    public U2FRegistrationChallenge(String u2fversion, String username) throws IllegalArgumentException {
         super(u2fversion, username);
-        nonce = CryptoUtil.getRandom(Integer.parseInt(Common.getProperty("skfs.cfg.property.entropylength")));
+        this.nonce = CryptoUtil.getRandom(Integer.parseInt(Common.getProperty("skfs.cfg.property.entropylength")));
     }
 
     public String getVersion() {
@@ -24,7 +24,7 @@ public class U2FRegistrationChallenge extends U2FChallenge implements Serializab
     }
 
     public String getNonce() {
-        return nonce;
+        return this.nonce;
     }
 
     public final JsonObject toJsonObject() {

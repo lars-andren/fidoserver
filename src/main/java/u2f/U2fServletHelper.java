@@ -1,6 +1,5 @@
 package u2f;
 
-import common.Common;
 import common.Constants;
 import lombok.extern.java.Log;
 import org.springframework.stereotype.Service;
