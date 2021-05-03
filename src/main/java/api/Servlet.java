@@ -6,7 +6,7 @@ import transaction.requests.PreauthenticationRequest;
 import transaction.requests.PreregistrationRequest;
 import transaction.requests.RegistrationRequest;
 import org.springframework.stereotype.Service;
-import u2f.U2fServletHelper;
+import u2f.U2FServletHelper;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.*;
@@ -26,7 +26,7 @@ public class Servlet {
     private HttpServletRequest request;
 
     @Autowired
-    U2fServletHelper u2fHelper;
+    U2FServletHelper u2fHelper;
 
     authenticateRestRequestBeanLocal authRest;
 

@@ -1,20 +1,27 @@
 package u2f;
 
+import common.Common;
 import common.Constants;
 import lombok.extern.java.Log;
 import org.springframework.stereotype.Service;
+import session.SessionType;
+import session.UserSessionInfo;
 import transaction.requests.PreregistrationRequest;
 import u2f.util.U2FVerifier;
 import util.ReturnPair;
 
+import javax.jms.Session;
 import javax.json.*;
 import javax.ws.rs.core.Response;
 import java.io.StringReader;
+import java.io.UnsupportedEncodingException;
+import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
 import java.util.Date;
 
 @Log
 @Service
-public class U2fServletHelper {
+public class U2FServletHelper {
 
     public Response preregister(PreregistrationRequest preregistration) {
 
@@ -22,6 +29,9 @@ public class U2fServletHelper {
         Date out;
         long thId = Thread.currentThread().getId();
         String ID = thId + "-" + in.getTime();
+        String username = preregistration.getPayload().getUsername();
+        String protocol = preregistration.getSVCInfo().getProtocol();
+
         //  1. Receive request and print inputs
         log.info("FIDO-MSG-0001 [TXID=" + ID + "]"
                 + "\n protocol=" + preregistration.getSVCInfo().getProtocol()
@@ -30,14 +40,14 @@ public class U2fServletHelper {
                 + "\n options=" + preregistration.getPayload().getOptions()
                 + "\n extensions=" + preregistration.getPayload().getExtensions());
 
-        ReturnPair<Boolean, Response> protocol = U2FVerifier.checkProtocol(preregistration);
-        if (protocol.returnSomeValue()) {
-            return protocol.getValueToReturn();
+        ReturnPair<Boolean, Response> protocolReturn = U2FVerifier.checkProtocol(preregistration);
+        if (protocolReturn.returnSomeValue()) {
+            return protocolReturn.getValueToReturn();
         }
 
-        ReturnPair<Boolean, Response> username = U2FVerifier.checkUsername(preregistration);
-        if (username.returnSomeValue()) {
-            return username.getValueToReturn();
+        ReturnPair<Boolean, Response> usernameReturn = U2FVerifier.checkUsername(preregistration);
+        if (usernameReturn.returnSomeValue()) {
+            return usernameReturn.getValueToReturn();
         }
 
         if (preregistration.getSVCInfo().getProtocol().equalsIgnoreCase(Constants.FIDO_PROTOCOL_VERSION_U2F_V2)) {
@@ -48,50 +58,33 @@ public class U2fServletHelper {
 
             U2FRegistrationChallenge regChallenge = null;
             try {
-                FEreturn fer = u2fpreregbean.execute(did, preregistration.getSVCInfo().getProtocol(), preregistration.getPayload().getUsername());
-                if (fer != null) {
-                    SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, SKFSCommon.getMessageProperty("FIDO-MSG-0046"), fer.toString());
+                regChallenge = new U2FRegistrationChallenge(protocol, username);
 
-                    logs = fer.getLogmsg();
-                    regChallenge = (U2FRegistrationChallenge) fer.getResponse();
-                    if (regChallenge == null) {
-                        //  Chould not generate registration nonce.
-                        SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, SKFSCommon.getMessageProperty("FIDO-ERR-0025"), "");
-                        return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(SKFSCommon.getMessageProperty("FIDO-ERR-0025") + "").build();
+                log.fine("Username got challenge " + regChallenge.toJsonString());
+
+                    if (regChallenge.getNonce() == null) {
+
+                        log.severe("Could not generate nonce for challenge.");
+                        return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Could not generate nonce for challenge.").build();
                     } else {
-                        //  Fetch sessionid, nonce & appid from the Challenge object
-                        //  then store it in the sessionMap for further use.
                         String nonce = regChallenge.getNonce();
-                        String nonceHash = SKFSCommon.getDigest(nonce, "SHA-256");
+                        String nonceHash = Common.getDigest(nonce, "SHA-256");
 
-                        UserSessionInfo session = new UserSessionInfo(preregistration.getPayload().getUsername(), nonce, appid, "register", "", "");
-                        session.setSid(applianceCommon.getServerId().shortValue());
-                        session.setSkid(applianceCommon.getServerId().shortValue());
-                        skceMaps.getMapObj().put(SKFSConstants.MAP_USER_SESSION_INFO, nonceHash, session);
-                        //replicate map to other server
+                        UserSessionInfo session = new UserSessionInfo(username, nonce, SessionType.REGISTER, "", "");
                         session.setMapkey(nonceHash);
-                        try {
-                            if (applianceCommon.replicate()) {
-                                replObj.execute(applianceConstants.ENTITY_TYPE_MAP_USER_SESSION_INFO, applianceConstants.REPLICATION_OPERATION_HASHMAP_ADD, applianceCommon.getServerId().toString(), session);
-                            }
-                        } catch (Exception e) {
-                            throw new RuntimeException(e.getLocalizedMessage());
-                        }
-                        //end publish
 
-                        SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, SKFSCommon.getMessageProperty("FIDO-MSG-0021"), " username=" + preregistration.getPayload().getUsername());
+                        log.fine("Session created for username=" + username);
                     }
-                }
-            } catch (SKFEException |NoSuchAlgorithmException | NoSuchProviderException | UnsupportedEncodingException ex) {
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, SKFSCommon.getMessageProperty("FIDO-ERR-0003"), ex.getMessage());
-                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(SKFSCommon.getMessageProperty("FIDO-ERR-0003") + ex.getMessage()).build();
+            } catch (NoSuchAlgorithmException | NoSuchProviderException | UnsupportedEncodingException e) {
+                String error = "Exception during challenge generation: " + e.getMessage();
+                log.severe(error);
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
             }
 
-            //  Make a silent preauthenticate call to fetch all the key handles.
-            //  Look into the database to check for key handles
             String[] authresponses = null;
             try {
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, SKFSCommon.getMessageProperty("FIDO-MSG-0031"), "");
+                log.fine("Making a silent preauthenticate call to fetch all the key handles.");
+
                 Collection<FidoKeys> kh_coll = getkeybean.getByUsername(did, preregistration.getPayload().getUsername());
                 if (kh_coll != null) {
                     authresponses = new String[kh_coll.size()];
@@ -122,9 +115,10 @@ public class U2fServletHelper {
             } catch (SKFEException ex) {
                 SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-0001", ex.getMessage());
                 return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(SKFSCommon.getMessageProperty("FIDO-ERR-0001") + ex.getMessage()).build();
-            } catch (IllegalArgumentException | SKIllegalArgumentException ex) {
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-0001", ex.getMessage());
-                return Response.status(Response.Status.BAD_REQUEST).entity(ex.getMessage()).build();
+            } catch (IllegalArgumentException e) {
+                String error = "Exception during challenge generation: " + e.getMessage();
+                log.severe(error);
+                return Response.status(Response.Status.BAD_REQUEST).entity(e.getMessage()).build();
             }
 
             JsonObject combined_regresponse;
@@ -143,78 +137,82 @@ public class U2fServletHelper {
 
                     signDataArray = arrayBuilder.build();
 
-                    SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, "FIDO-MSG-0034", " signdata array length = "
-                            + authresponses.length);
+                    log.fine("Signdata array length = " + authresponses.length);
                 }
 
                 //building regreq array
                 JsonArrayBuilder regarrayBuilder = Json.createArrayBuilder();
-                JsonObject regobj;
+                JsonObject regObj;
                 try (JsonReader jsonReader = Json.createReader(new StringReader(regChallenge.toJsonString()))) {
-                    regobj = jsonReader.readObject();
+                    regObj = jsonReader.readObject();
                 }
-                regarrayBuilder.add(regobj);
+                regarrayBuilder.add(regObj);
 
                 if (signDataArray == null) {
                     combined_regresponse = Json.createObjectBuilder()
-                            .add(SKFSConstants.JSON_KEY_APP_ID, appid)
-                            .add(SKFSConstants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
+                            .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
                             .build();
                 } else {
                     combined_regresponse = Json.createObjectBuilder()
-                            .add(SKFSConstants.JSON_KEY_APP_ID, appid)
-                            .add(SKFSConstants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
-                            .add(SKFSConstants.JSON_KEY_REGISTEREDKEY, signDataArray)
+                            .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
+                            .add(Constants.JSON_KEY_REGISTEREDKEY, signDataArray)
                             .build();
                 }
-            } catch (Exception ex) {
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-0001", ex.getMessage());
-                return Response.status(Response.Status.BAD_REQUEST).entity(SKFSCommon.getMessageProperty("FIDO-ERR-0001") + ex.getMessage()).build();
+            } catch (Exception e) {
+                String error = "Exception during challenge generation: " + e.getMessage();
+                log.severe(error);
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
             }
 
             // Build the output json object
             String response = Json.createObjectBuilder()
-                    .add(SKFSConstants.JSON_KEY_SERVLET_RETURN_RESPONSE, combined_regresponse)
+                    .add(Constants.JSON_KEY_SERVLET_RETURN_RESPONSE, combined_regresponse)
                     .build().toString();
-            SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, "FIDO-MSG-0035", "");
 
             out = new Date();
             long rt = out.getTime() - in.getTime();
-            //  4. Log output and return
-            SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.INFO, "FIDO-MSG-0002", "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime() + ", TTC=" + rt + "]"
-                    + "\nU2FRegistration Challenge parameters = " + response);
+
+            log.info("FIDO-MSG-0002" + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
+                    + ", TTC=" + rt + "]" + "\nU2FRegistration Challenge parameters = " + response);
             return Response.ok().entity(response).build();
         } else {
-            JsonObject jsonOptions = null;
-            if (preregistration.getPayload().getOptions() != null && !preregistration.getPayload().getOptions().isEmpty()) {
-                StringReader stringreader = new StringReader(preregistration.getPayload().getOptions().toString());
-                JsonReader jsonreader = Json.createReader(stringreader);
-                jsonOptions = jsonreader.readObject();
-            }
-
-            JsonObject jsonExtensions = null;
-            if (preregistration.getPayload().getExtensions() != null && !preregistration.getPayload().getExtensions().isEmpty()) {
-                StringReader stringreader = new StringReader(preregistration.getPayload().getExtensions());
-                JsonReader jsonreader = Json.createReader(stringreader);
-                jsonExtensions = jsonreader.readObject();
-            }
+            JsonObject jsonOptions = createJsonOptions(preregistration);
+            JsonObject jsonExtensions = createJsonExtensions(preregistration);
 
             String response;
             try {
                 response = fido2preregbean.execute(did, preregistration.getPayload().getUsername(), preregistration.getPayload().getDisplayname(), jsonOptions, jsonExtensions);
-            } catch (IllegalArgumentException | SKIllegalArgumentException ex) {
-                return Response.status(Response.Status.BAD_REQUEST).entity(ex.getMessage()).build();
+            } catch (IllegalArgumentException e) {
+                return Response.status(Response.Status.BAD_REQUEST).entity(e.getMessage()).build();
             }
             out = new Date();
             long rt = out.getTime() - in.getTime();
-            //  4. Log output and return
-            SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.INFO, "FIDO-MSG-0002", "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime() + ", TTC=" + rt + "]"
-                    + "\nFIDO2Registration Challenge parameters = " + response);
+
+            log.info("FIDO-MSG-0002 " + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
+                    + ", TTC=" + rt + "]" + "\nFIDO2Registration Challenge parameters = " + response);
             return Response.ok().entity(response).build();
         }
     }
 
+    private JsonObject createJsonOptions(PreregistrationRequest preregistration) {
+        if (preregistration.getPayload().getOptions() != null && !preregistration.getPayload().getOptions().isEmpty()) {
+            StringReader stringreader = new StringReader(preregistration.getPayload().getOptions().toString());
+            JsonReader jsonreader = Json.createReader(stringreader);
+            return jsonreader.readObject();
+        } else {
+            return null;
+        }
+    }
 
+    private JsonObject createJsonExtensions(PreregistrationRequest preregistration) {
+        if (preregistration.getPayload().getExtensions() != null && !preregistration.getPayload().getExtensions().isEmpty()) {
+            StringReader stringreader = new StringReader(preregistration.getPayload().getExtensions());
+            JsonReader jsonreader = Json.createReader(stringreader);
+            return jsonreader.readObject();
+        } else {
+            return null;
+        }
+    }
 
     /**
      * Method that performs registration process in FIDO U2F protocol. This
