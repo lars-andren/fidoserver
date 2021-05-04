@@ -11,7 +11,7 @@ import javax.json.JsonObjectBuilder;
  */
 public class SVCInfo {
 
-    private int did;
+    private String icpId;
     private String protocol;
     private String authtype;
     private String svcusername;
@@ -19,12 +19,12 @@ public class SVCInfo {
 
     public SVCInfo() { }
 
-    public int getDid() {
-        return did;
+    public String getIcpId() {
+        return icpId;
     }
 
-    public void setDid(int did) {
-        this.did = did;
+    public void setIcpId(String icpId) {
+        this.icpId = icpId;
     }
 
     public String getProtocol() {
@@ -61,7 +61,7 @@ public class SVCInfo {
 
     public JsonObject toJsonObject() {
         JsonObjectBuilder job = Json.createObjectBuilder();
-        job.add("did", this.did);
+        job.add("did", this.icpId);
         job.add("protocol", this.protocol);
         job.add("authtype", this.authtype);
         if (this.svcusername != null) {

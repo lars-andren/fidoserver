@@ -1,27 +1,37 @@
 package u2f;
 
+import ch.qos.logback.core.status.Status;
 import common.Common;
 import common.Constants;
+import crypto.CryptoUtil;
+import dal.Database;
 import lombok.extern.java.Log;
+import model.FidoKey;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import session.SessionType;
 import session.UserSessionInfo;
 import transaction.requests.PreregistrationRequest;
 import u2f.util.U2FVerifier;
+import util.Pair;
 import util.ReturnPair;
 
-import javax.jms.Session;
 import javax.json.*;
 import javax.ws.rs.core.Response;
 import java.io.StringReader;
 import java.io.UnsupportedEncodingException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
+import java.util.Collection;
 import java.util.Date;
+import java.util.Iterator;
 
 @Log
 @Service
 public class U2FServletHelper {
+
+    @Autowired
+    Database database;
 
     public Response preregister(PreregistrationRequest preregistration) {
 
@@ -31,11 +41,13 @@ public class U2FServletHelper {
         String ID = thId + "-" + in.getTime();
         String username = preregistration.getPayload().getUsername();
         String protocol = preregistration.getSVCInfo().getProtocol();
+        String icpId = preregistration.getSVCInfo().getIcpId();
 
         //  1. Receive request and print inputs
         log.info("FIDO-MSG-0001 [TXID=" + ID + "]"
-                + "\n protocol=" + preregistration.getSVCInfo().getProtocol()
-                + "\n username=" + preregistration.getPayload().getUsername()
+                + "\n protocol=" + protocol
+                + "\n icpId=" + icpId
+                + "\n username=" + username
                 + "\n displayname=" + preregistration.getPayload().getDisplayname()
                 + "\n options=" + preregistration.getPayload().getOptions()
                 + "\n extensions=" + preregistration.getPayload().getExtensions());
@@ -50,168 +62,151 @@ public class U2FServletHelper {
             return usernameReturn.getValueToReturn();
         }
 
-        if (preregistration.getSVCInfo().getProtocol().equalsIgnoreCase(Constants.FIDO_PROTOCOL_VERSION_U2F_V2)) {
+        //  3. Do processing - call preauthenticate on every key handle
 
-            //  3. Do processing - Do not do it here.. instead call preauthenticate on every key handle
-            String logs = "";
-            String errmsg = "";
-
-            U2FRegistrationChallenge regChallenge = null;
-            try {
-                regChallenge = new U2FRegistrationChallenge(protocol, username);
-
-                log.fine("Username got challenge " + regChallenge.toJsonString());
-
-                    if (regChallenge.getNonce() == null) {
-
-                        log.severe("Could not generate nonce for challenge.");
-                        return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Could not generate nonce for challenge.").build();
-                    } else {
-                        String nonce = regChallenge.getNonce();
-                        String nonceHash = Common.getDigest(nonce, "SHA-256");
-
-                        UserSessionInfo session = new UserSessionInfo(username, nonce, SessionType.REGISTER, "", "");
-                        session.setMapkey(nonceHash);
-
-                        log.fine("Session created for username=" + username);
-                    }
-            } catch (NoSuchAlgorithmException | NoSuchProviderException | UnsupportedEncodingException e) {
-                String error = "Exception during challenge generation: " + e.getMessage();
-                log.severe(error);
-                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
-            }
-
-            String[] authresponses = null;
-            try {
-                log.fine("Making a silent preauthenticate call to fetch all the key handles.");
-
-                Collection<FidoKeys> kh_coll = getkeybean.getByUsername(did, preregistration.getPayload().getUsername());
-                if (kh_coll != null) {
-                    authresponses = new String[kh_coll.size()];
-                    Iterator it = kh_coll.iterator();
-                    int i = 0;
-
-                    SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, SKFSCommon.getMessageProperty("FIDO-MSG-0032"), "");
-                    while (it.hasNext()) {
-                        FidoKeys key = (FidoKeys) it.next();
-                        if (key != null) {
-                            String kh = decryptKH(key.getKeyhandle());
-
-                            // Do a silent preauthenticate call to get auth wsresponse for this key handle.
-                            // Fetch transports from the child table and create a jsonarray and pass it on to the auth challenge object
-                            FEreturn feskcero = u2fpreauthbean.execute(did, preregistration.getSVCInfo().getProtocol(), preregistration.getPayload().getUsername(), kh, key.getAppid(), SKFSCommon.getTransportJson(key.getTransports().intValue()));
-                            if (feskcero != null) {
-                                U2FAuthenticationChallenge authChallenge = (U2FAuthenticationChallenge) feskcero.getResponse();
-                                if (authChallenge != null) {
-                                    authresponses[i] = authChallenge.toJsonString(appid);
-                                    i++;
-                                }
-                            }
-                        }
-                    }
-
-                    SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, SKFSCommon.getMessageProperty("FIDO-MSG-0033"), "");
-                }
-            } catch (SKFEException ex) {
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-0001", ex.getMessage());
-                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(SKFSCommon.getMessageProperty("FIDO-ERR-0001") + ex.getMessage()).build();
-            } catch (IllegalArgumentException e) {
-                String error = "Exception during challenge generation: " + e.getMessage();
-                log.severe(error);
-                return Response.status(Response.Status.BAD_REQUEST).entity(e.getMessage()).build();
-            }
-
-            JsonObject combined_regresponse;
-            JsonArray signDataArray = null;
-            try {
-                if (authresponses != null) {
-
-                    JsonArrayBuilder arrayBuilder = Json.createArrayBuilder();
-                    for (String authresponse : authresponses) {
-                        JsonObject ar;
-                        try (JsonReader jsonReader = Json.createReader(new StringReader(authresponse))) {
-                            ar = jsonReader.readObject();
-                        }
-                        arrayBuilder.add(ar);
-                    }
-
-                    signDataArray = arrayBuilder.build();
-
-                    log.fine("Signdata array length = " + authresponses.length);
-                }
-
-                //building regreq array
-                JsonArrayBuilder regarrayBuilder = Json.createArrayBuilder();
-                JsonObject regObj;
-                try (JsonReader jsonReader = Json.createReader(new StringReader(regChallenge.toJsonString()))) {
-                    regObj = jsonReader.readObject();
-                }
-                regarrayBuilder.add(regObj);
-
-                if (signDataArray == null) {
-                    combined_regresponse = Json.createObjectBuilder()
-                            .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
-                            .build();
-                } else {
-                    combined_regresponse = Json.createObjectBuilder()
-                            .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
-                            .add(Constants.JSON_KEY_REGISTEREDKEY, signDataArray)
-                            .build();
-                }
-            } catch (Exception e) {
-                String error = "Exception during challenge generation: " + e.getMessage();
-                log.severe(error);
-                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
-            }
-
-            // Build the output json object
-            String response = Json.createObjectBuilder()
-                    .add(Constants.JSON_KEY_SERVLET_RETURN_RESPONSE, combined_regresponse)
-                    .build().toString();
-
-            out = new Date();
-            long rt = out.getTime() - in.getTime();
-
-            log.info("FIDO-MSG-0002" + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
-                    + ", TTC=" + rt + "]" + "\nU2FRegistration Challenge parameters = " + response);
-            return Response.ok().entity(response).build();
+        U2FRegistrationChallenge regChallenge;
+        Pair<U2FRegistrationChallenge, Response> regChallengePair = createU2FRegistrationChallenge(protocol, username);
+        if (regChallengePair.getSecond() != null) {
+            return regChallengePair.getSecond();
         } else {
-            JsonObject jsonOptions = createJsonOptions(preregistration);
-            JsonObject jsonExtensions = createJsonExtensions(preregistration);
-
-            String response;
-            try {
-                response = fido2preregbean.execute(did, preregistration.getPayload().getUsername(), preregistration.getPayload().getDisplayname(), jsonOptions, jsonExtensions);
-            } catch (IllegalArgumentException e) {
-                return Response.status(Response.Status.BAD_REQUEST).entity(e.getMessage()).build();
-            }
-            out = new Date();
-            long rt = out.getTime() - in.getTime();
-
-            log.info("FIDO-MSG-0002 " + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
-                    + ", TTC=" + rt + "]" + "\nFIDO2Registration Challenge parameters = " + response);
-            return Response.ok().entity(response).build();
+            regChallenge = regChallengePair.getFirst();
         }
+
+        String[] authnResponses;
+        Pair<String[], Response> authResponsePair = createAuthnChallenges(icpId, protocol, username);
+        if (authResponsePair.getSecond() != null) {
+            return authResponsePair.getSecond();
+        } else {
+            authnResponses = authResponsePair.getFirst();
+        }
+
+        JsonObject combined_regresponse;
+        JsonArray signDataArray = null;
+        try {
+            if (authnResponses != null) {
+
+                JsonArrayBuilder arrayBuilder = Json.createArrayBuilder();
+                for (String authresponse : authnResponses) {
+                    JsonObject ar;
+                    try (JsonReader jsonReader = Json.createReader(new StringReader(authresponse))) {
+                        ar = jsonReader.readObject();
+                    }
+                    arrayBuilder.add(ar);
+                }
+
+                signDataArray = arrayBuilder.build();
+
+                log.fine("Signdata array length = " + authnResponses.length);
+            }
+
+            //building regreq array
+            JsonArrayBuilder regarrayBuilder = Json.createArrayBuilder();
+            JsonObject regObj;
+            try (JsonReader jsonReader = Json.createReader(new StringReader(regChallenge.toJsonString()))) {
+                regObj = jsonReader.readObject();
+            }
+            regarrayBuilder.add(regObj);
+
+            if (signDataArray == null) {
+                combined_regresponse = Json.createObjectBuilder()
+                        .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
+                        .build();
+            } else {
+                combined_regresponse = Json.createObjectBuilder()
+                        .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
+                        .add(Constants.JSON_KEY_REGISTEREDKEY, signDataArray)
+                        .build();
+            }
+        } catch (Exception e) {
+            String error = "Exception during challenge generation: " + e.getMessage();
+            log.severe(error);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
+        }
+
+        // Build the output json object
+        String response = Json.createObjectBuilder()
+                .add(Constants.JSON_KEY_SERVLET_RETURN_RESPONSE, combined_regresponse)
+                .build().toString();
+
+        out = new Date();
+        long rt = out.getTime() - in.getTime();
+
+        log.info("FIDO-MSG-0002" + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
+                + ", TTC=" + rt + "]" + "\nU2FRegistration Challenge parameters = " + response);
+        return Response.ok().entity(response).build();
     }
 
-    private JsonObject createJsonOptions(PreregistrationRequest preregistration) {
-        if (preregistration.getPayload().getOptions() != null && !preregistration.getPayload().getOptions().isEmpty()) {
-            StringReader stringreader = new StringReader(preregistration.getPayload().getOptions().toString());
-            JsonReader jsonreader = Json.createReader(stringreader);
-            return jsonreader.readObject();
-        } else {
-            return null;
+    private Pair<U2FRegistrationChallenge, Response> createU2FRegistrationChallenge(String protocol, String username) {
+
+        Pair<U2FRegistrationChallenge, Response> pair = new Pair<>();
+        U2FRegistrationChallenge regChallenge = null;
+        try {
+            regChallenge = new U2FRegistrationChallenge(protocol, username);
+
+            log.fine("Username got challenge " + regChallenge.toJsonString());
+
+            if (regChallenge.getNonce() == null) {
+
+                log.severe("Could not generate nonce for challenge.");
+                pair.setSecond(Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity("Could not generate nonce for challenge.").build());
+            } else {
+                String nonce = regChallenge.getNonce();
+                String nonceHash = Common.getDigest(nonce, "SHA-256");
+
+                UserSessionInfo session = new UserSessionInfo(username, nonce, SessionType.REGISTER, "", "");
+                session.setMapkey(nonceHash);
+
+                log.fine("Session created for username=" + username);
+            }
+        } catch (NoSuchAlgorithmException | NoSuchProviderException | UnsupportedEncodingException e) {
+            String error = "Exception during challenge generation: " + e.getMessage();
+            log.severe(error);
+            pair.setSecond(Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build());
         }
+
+        pair.setFirst(regChallenge);
+        return pair;
     }
 
-    private JsonObject createJsonExtensions(PreregistrationRequest preregistration) {
-        if (preregistration.getPayload().getExtensions() != null && !preregistration.getPayload().getExtensions().isEmpty()) {
-            StringReader stringreader = new StringReader(preregistration.getPayload().getExtensions());
-            JsonReader jsonreader = Json.createReader(stringreader);
-            return jsonreader.readObject();
-        } else {
-            return null;
+    private Pair<String[], Response> createAuthnChallenges(String icpId, String protocol, String username) {
+
+        Pair<String[], Response> pair = new Pair<>();
+        String[] authresponses = null;
+        try {
+            log.fine("Making a silent preauthenticate call to fetch all the key handles.");
+
+            Collection<FidoKey> kh_coll = database.getByUsername(icpId, username);
+            if (kh_coll != null) {
+                authresponses = new String[kh_coll.size()];
+                Iterator<FidoKey> it = kh_coll.iterator();
+                int i = 0;
+
+                while (it.hasNext()) {
+                    FidoKey key = (FidoKey) it.next();
+                    if (key != null) {
+                        String keyhandle = decryptKH(key.getKeyhandle());
+
+                        // Do a silent preauthenticate call to get auth wsresponse for this key handle.
+                        // Fetch transports and create a jsonarray and pass it on to the auth challenge object
+                        U2FAuthenticationChallenge authChallenge = new U2FAuthenticationChallenge(
+                                protocol,
+                                username,
+                                keyhandle,
+                                key.getAppid(),
+                                Common.getTransportJson(key.getTransports().intValue()));
+
+                        authresponses[i] = authChallenge.toJsonString(key.getAppid());
+                        i++;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.severe("Exception when creating preauth: " + e.getMessage());
+            pair.setSecond(Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(e.getMessage()).build());
         }
+
+        pair.setFirst(authresponses);
+        return pair;
     }
 
     /**
@@ -1187,47 +1182,13 @@ public class U2FServletHelper {
     }
 
     private String decryptKH(String token) {
-        String retvalue = token;
-        if (SKFSCommon.getConfigurationProperty("skfs.cfg.property.db.keyhandle.encrypt").equalsIgnoreCase("true")) {
-            String clusterid = "1";
-            String domainid = skceCommon.getConfigurationProperty("skfs.cfg.property.db.keyhandle.encrypt.saka.domainid");
-            String sakausername = skceCommon.getClusterDomainProperty(Long.parseLong(clusterid), Long.parseLong(domainid), "username");
-            String sakapassword = skceCommon.getClusterDomainProperty(Long.parseLong(clusterid), Long.parseLong(domainid), "password");
-            String hosturl = skceCommon.getWorkingHostURLInCluster(Long.parseLong(clusterid), Long.parseLong(domainid));
-            Encryption port = SAKAConnector.getSAKAConn().getSAKAPort(Integer.parseInt(clusterid), hosturl);
-            if (port == null) {
-                // Create URL for calling web-service
-                URL baseUrl = com.strongkey.saka.web.EncryptionService.class.getResource(".");
-                String ENCRYPTION_SERVICE_WSDL_SUFFIX = SKFSCommon.getConfigurationProperty("skfs.cfg.property.saka.encryption.wsdlsuffix");
-                URL url = null;
-                try {
-                    url = new URL(baseUrl, hosturl + ENCRYPTION_SERVICE_WSDL_SUFFIX);
-                } catch (MalformedURLException ex) {
-                    Logger.getLogger(FidoKeys.class.getName()).log(Level.SEVERE, null, ex);
-                }
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.INFO, "SKCE-MSG-4028", hosturl);
-
-                //  Check to see if the url is available.
-                if (skceCommon.isURLAccessible(url)) {
-                    // Create EncryptionService and Encryption objects
-                    EncryptionService cryptosvc = new EncryptionService(url);
-                    port = cryptosvc.getEncryptionPort();
-                    SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, "SKCE-MSG-4013", hosturl);
-                }
-            }
-
-            // Escrow the key and place the key/token in local map
-            if (port != null) {
-                try {
-                    retvalue = port.decrypt(Long.parseLong(domainid), sakausername, sakapassword, token);
-
-                } catch (StrongKeyLiteException_Exception ex) {
-                    Logger.getLogger(FidoKeys.class.getName()).log(Level.SEVERE, null, ex);
-                }
-            }
+        String decryptedToken = "";
+        try {
+            decryptedToken = CryptoUtil.decryptAES(token);
+        } catch (Exception e) {
+            log.severe("Could not decrypt");
         }
-        return retvalue;
-    }
-}
 
+        return decryptedToken;
+    }
 }

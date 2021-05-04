@@ -10,70 +10,32 @@ import com.google.common.base.Strings;
 import com.strongkey.appliance.entitybeans.Configurations;
 import com.strongkey.appliance.utilities.applianceCommon;
 import com.strongkey.appliance.utilities.applianceMaps;
-import static com.strongkey.cbor.jacob.CborConstants.*;
-import static com.strongkey.cbor.jacob.CborConstants.BREAK;
-import static com.strongkey.cbor.jacob.CborConstants.DOUBLE_PRECISION_FLOAT;
-import static com.strongkey.cbor.jacob.CborConstants.FALSE;
-import static com.strongkey.cbor.jacob.CborConstants.HALF_PRECISION_FLOAT;
-import static com.strongkey.cbor.jacob.CborConstants.NULL;
-import static com.strongkey.cbor.jacob.CborConstants.ONE_BYTE;
-import static com.strongkey.cbor.jacob.CborConstants.SINGLE_PRECISION_FLOAT;
-import static com.strongkey.cbor.jacob.CborConstants.TRUE;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_ARRAY;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_BYTE_STRING;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_FLOAT_SIMPLE;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_MAP;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_NEGATIVE_INTEGER;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_TAG;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_TEXT_STRING;
-import static com.strongkey.cbor.jacob.CborConstants.TYPE_UNSIGNED_INTEGER;
-import static com.strongkey.cbor.jacob.CborConstants.UNDEFINED;
-
 import com.strongkey.cbor.jacob.CborDecoder;
 import com.strongkey.cbor.jacob.CborType;
 import com.strongkey.skce.utilities.TPMConstants;
 import com.strongkey.skfs.pojos.FIDOReturnObject;
 import com.strongkey.skfs.pojos.FIDOReturnObjectV1;
 import com.strongkey.skfs.requests.ServiceInfo;
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.StringReader;
-import java.io.UnsupportedEncodingException;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.x9.ECNamedCurveTable;
+import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
+
+import javax.json.*;
+import javax.json.stream.JsonParsingException;
+import javax.ws.rs.core.Response;
+import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.Security;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.ResourceBundle;
-import java.util.Set;
-import java.util.SortedMap;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import javax.json.Json;
-import javax.json.JsonArray;
-import javax.json.JsonArrayBuilder;
-import javax.json.JsonObject;
-import javax.json.JsonReader;
-import javax.json.stream.JsonParsingException;
-import javax.ws.rs.core.Response;
-import org.bouncycastle.asn1.ASN1ObjectIdentifier;
-import org.bouncycastle.asn1.x9.ECNamedCurveTable;
-import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
+
+import static com.strongkey.cbor.jacob.CborConstants.*;
 
 public class Common {
 
@@ -668,19 +630,13 @@ public class Common {
         return null;
     }
 
-    /**
-     * Checks to see if the protocol provided is supported by skfs.
-     *
-     * @param protocol - String, protocol to be checked
-     * @return - true or false based on whether the protocol is among the list
-     * of supported protocols or not.
-     */
     public static boolean isFIDOProtocolSupported(String protocol) {
         if (protocol == null || protocol.isEmpty()) {
             return false;
         }
 
-        return !(!protocol.equalsIgnoreCase(SKFSConstants.FIDO_PROTOCOL_VERSION_U2F_V2) && !protocol.equalsIgnoreCase(SKFSConstants.FIDO_PROTOCOL_VERSION_2_0));
+        return (protocol.equalsIgnoreCase(Constants.FIDO_PROTOCOL_VERSION_U2F_V2)
+                || protocol.equalsIgnoreCase(Constants.FIDO_PROTOCOL_VERSION_2_0));
     }
 
     public static String getAlgFromIANACOSEAlg(long alg) {

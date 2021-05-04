@@ -41,12 +41,7 @@ public class Servlet {
     @Consumes({"application/json"})
     @Produces({"application/json"})
     public Response preregister(PreregistrationRequest preregistration) {
-
-        if (!authRest.execute(did, request, preregistration)) {
-            return Response.status(Response.Status.UNAUTHORIZED).build();
-        }
-
-        return u2fHelperBean.preregister(did, preregistration);
+        return u2fHelper.preregister(preregistration);
     }
 
     /**

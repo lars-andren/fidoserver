@@ -6,8 +6,6 @@ public class ReturnPair<Boolean, V> {
 
     private V valueToReturn;
 
-    public ReturnPair() {}
-
     public ReturnPair(Boolean returnSomeValue, V valueToReturn) {
 
         this.returnSomeValue = returnSomeValue;
