@@ -7,15 +7,7 @@
 package common;
 
 import com.google.common.base.Strings;
-import com.strongkey.appliance.entitybeans.Configurations;
-import com.strongkey.appliance.utilities.applianceCommon;
-import com.strongkey.appliance.utilities.applianceMaps;
-import com.strongkey.cbor.jacob.CborDecoder;
-import com.strongkey.cbor.jacob.CborType;
-import com.strongkey.skce.utilities.TPMConstants;
-import com.strongkey.skfs.pojos.FIDOReturnObject;
-import com.strongkey.skfs.pojos.FIDOReturnObjectV1;
-import com.strongkey.skfs.requests.ServiceInfo;
+import lombok.extern.java.Log;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.x9.ECNamedCurveTable;
 import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
@@ -37,6 +29,7 @@ import java.util.logging.Logger;
 
 import static com.strongkey.cbor.jacob.CborConstants.*;
 
+@Log
 public class Common {
 
     private static final String classname = "skfsCommon";
@@ -218,6 +211,19 @@ public class Common {
         cron.flushFIDOKeysJob();
 
         putTransportsMap();
+    }
+
+    public static JsonObject stringToJSON(String jsonstr) {
+        if (jsonstr == null || jsonstr.isEmpty()) {
+            return null;
+        }
+
+        try (JsonReader jsonReader = Json.createReader(new StringReader(jsonstr))) {
+            return jsonReader.readObject();
+        } catch (Exception e) {
+            log.severe("Could not create JSON from string: " + jsonstr + " error: " + e.getLocalizedMessage());
+        }
+        return null;
     }
 
     public static String getProperty(String name) {
@@ -903,7 +909,7 @@ public class Common {
         ServiceInfo svinfo = new ServiceInfo();
         try {
             if (svcinfo == null) {
-                SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-2003",
+                SKFSLogger.log(Constants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-2003",
                         "NULL");
                 svinfo.setErrormsg(SKFSCommon.getMessageProperty("FIDO-ERR-2003").replace("{0}", "") + "NULL");
                 return svinfo;

@@ -9,6 +9,7 @@ import lombok.extern.java.Log;
 import model.FidoKey;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import service.Fido2Preregister;
 import session.SessionType;
 import session.UserSessionInfo;
 import transaction.requests.PreregistrationRequest;
@@ -32,6 +33,9 @@ public class U2FServletHelper {
 
     @Autowired
     Database database;
+
+    @Autowired
+    Fido2Preregister fido2Preregister;
 
     public Response preregister(PreregistrationRequest preregistration) {
 
@@ -62,78 +66,122 @@ public class U2FServletHelper {
             return usernameReturn.getValueToReturn();
         }
 
-        //  3. Do processing - call preauthenticate on every key handle
+        if (preregistration.getSVCInfo().getProtocol().equalsIgnoreCase(Constants.FIDO_PROTOCOL_VERSION_U2F_V2)) {
+            U2FRegistrationChallenge regChallenge;
+            Pair<U2FRegistrationChallenge, Response> regChallengePair = createU2FRegistrationChallenge(protocol, username);
 
-        U2FRegistrationChallenge regChallenge;
-        Pair<U2FRegistrationChallenge, Response> regChallengePair = createU2FRegistrationChallenge(protocol, username);
-        if (regChallengePair.getSecond() != null) {
-            return regChallengePair.getSecond();
-        } else {
-            regChallenge = regChallengePair.getFirst();
-        }
+            if (regChallengePair.getSecond() != null) {
+                return regChallengePair.getSecond();
+            } else {
+                regChallenge = regChallengePair.getFirst();
+            }
 
-        String[] authnResponses;
-        Pair<String[], Response> authResponsePair = createAuthnChallenges(icpId, protocol, username);
-        if (authResponsePair.getSecond() != null) {
-            return authResponsePair.getSecond();
-        } else {
-            authnResponses = authResponsePair.getFirst();
-        }
+            String[] authnResponses;
+            Pair<String[], Response> authResponsePair = createAuthnChallenges(icpId, protocol, username);
+            if (authResponsePair.getSecond() != null) {
+                return authResponsePair.getSecond();
+            } else {
+                authnResponses = authResponsePair.getFirst();
+            }
 
-        JsonObject combined_regresponse;
-        JsonArray signDataArray = null;
-        try {
-            if (authnResponses != null) {
+            JsonObject combined_regresponse;
+            JsonArray signDataArray = null;
+            try {
+                if (authnResponses != null) {
 
-                JsonArrayBuilder arrayBuilder = Json.createArrayBuilder();
-                for (String authresponse : authnResponses) {
-                    JsonObject ar;
-                    try (JsonReader jsonReader = Json.createReader(new StringReader(authresponse))) {
-                        ar = jsonReader.readObject();
+                    JsonArrayBuilder arrayBuilder = Json.createArrayBuilder();
+                    for (String authresponse : authnResponses) {
+                        JsonObject ar;
+                        try (JsonReader jsonReader = Json.createReader(new StringReader(authresponse))) {
+                            ar = jsonReader.readObject();
+                        }
+                        arrayBuilder.add(ar);
                     }
-                    arrayBuilder.add(ar);
+
+                    signDataArray = arrayBuilder.build();
+
+                    log.fine("Signdata array length = " + authnResponses.length);
                 }
 
-                signDataArray = arrayBuilder.build();
+                JsonArrayBuilder regarrayBuilder = Json.createArrayBuilder();
+                JsonObject regObj;
+                try (JsonReader jsonReader = Json.createReader(new StringReader(regChallenge.toJsonString()))) {
+                    regObj = jsonReader.readObject();
+                }
+                regarrayBuilder.add(regObj);
 
-                log.fine("Signdata array length = " + authnResponses.length);
+                if (signDataArray == null) {
+                    combined_regresponse = Json.createObjectBuilder()
+                            .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
+                            .build();
+                } else {
+                    combined_regresponse = Json.createObjectBuilder()
+                            .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
+                            .add(Constants.JSON_KEY_REGISTEREDKEY, signDataArray)
+                            .build();
+                }
+            } catch (Exception e) {
+                String error = "Exception during challenge generation: " + e.getMessage();
+                log.severe(error);
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
             }
 
-            //building regreq array
-            JsonArrayBuilder regarrayBuilder = Json.createArrayBuilder();
-            JsonObject regObj;
-            try (JsonReader jsonReader = Json.createReader(new StringReader(regChallenge.toJsonString()))) {
-                regObj = jsonReader.readObject();
-            }
-            regarrayBuilder.add(regObj);
+            // Build the output json object
+            String response = Json.createObjectBuilder()
+                    .add(Constants.JSON_KEY_SERVLET_RETURN_RESPONSE, combined_regresponse)
+                    .build().toString();
 
-            if (signDataArray == null) {
-                combined_regresponse = Json.createObjectBuilder()
-                        .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
-                        .build();
-            } else {
-                combined_regresponse = Json.createObjectBuilder()
-                        .add(Constants.JSON_KEY_REGISTERREQUEST, regarrayBuilder.build())
-                        .add(Constants.JSON_KEY_REGISTEREDKEY, signDataArray)
-                        .build();
-            }
-        } catch (Exception e) {
-            String error = "Exception during challenge generation: " + e.getMessage();
-            log.severe(error);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(error).build();
+            out = new Date();
+            long rt = out.getTime() - in.getTime();
+
+            log.info("FIDO-MSG-0002" + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
+                    + ", TTC=" + rt + "]" + "\nU2FRegistration Challenge parameters = " + response);
+            return Response.ok().entity(response).build();
+        } else {
+           return doFIDO2_0(preregistration, icpId, username, in, ID);
         }
+    }
 
-        // Build the output json object
-        String response = Json.createObjectBuilder()
-                .add(Constants.JSON_KEY_SERVLET_RETURN_RESPONSE, combined_regresponse)
-                .build().toString();
+    private Response doU2Fv2() {
 
-        out = new Date();
+    }
+
+    private Response doFIDO2_0(PreregistrationRequest preregistration, String icpId, String username, Date in, String ID) {
+        JsonObject jsonOptions = createJsonOptions(preregistration);
+        JsonObject jsonExtensions = createJsonExtensions(preregistration);
+
+        String response;
+        try {
+            response = fido2Preregister.execute(icpId, username, preregistration.getPayload().getDisplayname(), jsonOptions, jsonExtensions);
+        } catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST).entity(e.getMessage()).build();
+        }
+        Date out = new Date();
         long rt = out.getTime() - in.getTime();
 
-        log.info("FIDO-MSG-0002" + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
-                + ", TTC=" + rt + "]" + "\nU2FRegistration Challenge parameters = " + response);
+        log.info("FIDO-MSG-0002 " + "[TXID=" + ID + ", START=" + in.getTime() + ", FINISH=" + out.getTime()
+                + ", TTC=" + rt + "]" + "\nFIDO2Registration Challenge parameters = " + response);
         return Response.ok().entity(response).build();
+    }
+
+    private JsonObject createJsonOptions(PreregistrationRequest preregistration) {
+        if (preregistration.getPayload().getOptions() != null && !preregistration.getPayload().getOptions().isEmpty()) {
+            StringReader stringreader = new StringReader(preregistration.getPayload().getOptions().toString());
+            JsonReader jsonreader = Json.createReader(stringreader);
+            return jsonreader.readObject();
+        } else {
+            return null;
+        }
+    }
+
+    private JsonObject createJsonExtensions(PreregistrationRequest preregistration) {
+        if (preregistration.getPayload().getExtensions() != null && !preregistration.getPayload().getExtensions().isEmpty()) {
+            StringReader stringreader = new StringReader(preregistration.getPayload().getExtensions());
+            JsonReader jsonreader = Json.createReader(stringreader);
+            return jsonreader.readObject();
+        } else {
+            return null;
+        }
     }
 
     private Pair<U2FRegistrationChallenge, Response> createU2FRegistrationChallenge(String protocol, String username) {

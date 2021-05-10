@@ -17,11 +17,15 @@ public class Database {
 
     @PostConstruct
     public void setUp() {
-        fidoKey1 = new FidoKey("keyhandle", 1, new Date(), "here", "status", "signKeyType");
-        fidoKey2 = new FidoKey("keyhandle", 1, new Date(), "here", "status", "signKeyType");
+        fidoKey1 = new FidoKey("keyhandle", 1, new Date(), "here", "ACTIVE", "signKeyType");
+        fidoKey2 = new FidoKey("keyhandle", 1, new Date(), "here", "ACTIVE", "signKeyType");
     }
 
     public Collection<FidoKey> getByUsername(String icpId, String username) {
+        return new ArrayList<>(Arrays.asList(fidoKey1, fidoKey2));
+    }
+
+    public Collection<FidoKey> getKeysByUsernameStatus(String icpId, String username, String status) {
         return new ArrayList<>(Arrays.asList(fidoKey1, fidoKey2));
     }
 }

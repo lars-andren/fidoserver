@@ -1,0 +1,368 @@
+package service;
+
+import com.google.common.base.Strings;
+import dal.Database;
+import fido.FidoPolicyObject;
+import fido.RegistrationPolicyOptions;
+import lombok.extern.java.Log;
+import model.FidoKey;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import javax.json.*;
+import java.io.UnsupportedEncodingException;
+import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+@Service
+@Log
+public class Fido2Preregister {
+
+    @Autowired
+    Database database;
+
+    public String execute(String icpId, String username, String displayName, JsonObject options, JsonObject extensions) {
+
+        if (Strings.isNullOrEmpty(username)) {
+            log.severe("Username empty or null");
+            throw new IllegalArgumentException("Username empty or null");
+        }
+        if (Strings.isNullOrEmpty(displayName)) {
+            log.severe("displayName empty or null");
+            throw new IllegalArgumentException("displayName empty or null");
+        }
+
+        List<FidoKey> fks = new ArrayList<>();
+        FidoKey fk = null;
+        try {
+            fks.addAll(database.getKeysByUsernameStatus(icpId, username, "Active"));
+        } catch (Exception e) {
+            log.severe(e.getMessage());
+        }
+
+        if(fks.size() > 0) {
+            fk = fks.get(0);
+        }
+        //Gather useful information
+        FidoPolicyObject fidoPolicy = getpolicybean.getPolicyByDidUsername(icpId, username, fk);
+        if(fidoPolicy == null){
+            SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-0002", "No policy found");
+            throw new SKIllegalArgumentException(SKFSCommon.buildReturn(SKFSCommon.getMessageProperty("FIDO-ERR-0002") + "No policy found"));
+        }
+
+
+        RegistrationPolicyOptions regOp = fidoPolicy.getRegistrationOptions();
+        String userId ;
+        if(fk == null) {
+            userId = U2FUtility.getRandom(SKFSConstants.DEFAULT_NUM_USERID_BYTES);
+        }else{
+            userId = fk.getUserid();
+        }
+        String challenge = generateChallenge(fidoPolicy.getAlgorithmsOptions());
+        String origin = applianceMaps.getDomain(Long.parseLong(String.valueOf(icpId))).getSkfeAppid();    //TODO verify this origin (https://demo.strongkey.com) == appid (https://demo.strongkey.com/app.json from config file) in all our logic.
+        //Issue: webauthn specifies origin == rpid (demo.strongkey.com, https://demo.strongkey.com:8181, https://demo.strongkey.com are all valid)
+        //However rpid is optional and is stored in the policy file, defaulting to the rp's "effective domain"
+        //if not supplied.
+        //Since we cannot guess the effective domain, should the logic be use rpid if supplied, otherwise use appid(?).
+        String rpname = fidoPolicy.getRpOptions().getName();
+        String nonceHash = null;
+
+        //Create response object
+        JsonObjectBuilder returnObjectBuilder = Json.createObjectBuilder();
+        try{
+            nonceHash = SKFSCommon.getDigest(challenge, "SHA-256");
+            returnObjectBuilder
+                    .add(SKFSConstants.FIDO2_PREREG_ATTR_RP, generatePublicKeyCredentialRpEntity(fidoPolicy.getRpOptions()))
+                    .add(SKFSConstants.FIDO2_PREREG_ATTR_USER, generatePublicKeyCredentialUserEntity(regOp,
+                            icpId, username, userId, displayName, null)) //TODO handle user icon if it exists
+                    .add(SKFSConstants.FIDO2_PREREG_ATTR_CHALLENGE, challenge)
+                    .add(SKFSConstants.FIDO2_PREREG_ATTR_KEYPARAMS, generatePublicKeyCredentialParametersArray(fidoPolicy.getAlgorithmsOptions()))
+                    .add(SKFSConstants.FIDO2_PREREG_ATTR_EXCLUDECRED, generateExcludeCredentialsList(regOp, icpId, username, fks));
+        }
+        catch (NoSuchAlgorithmException | NoSuchProviderException | UnsupportedEncodingException | SKFEException ex) {
+            SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.SEVERE, "FIDO-ERR-0003", ex.getLocalizedMessage());
+            throw new SKIllegalArgumentException(SKFSCommon.buildReturn(SKFSCommon.getMessageProperty("FIDO-ERR-0003") + ex.getLocalizedMessage()));
+        }
+
+        JsonObject authSelect = generateAuthenticatorSelection(fidoPolicy, options);
+        if(authSelect != null){
+            returnObjectBuilder.add(SKFSConstants.FIDO2_PREREG_ATTR_AUTHENTICATORSELECT, authSelect);
+        }
+        String attestPref = generateAttestationConveyancePreference(fidoPolicy.getAttestationOptions(), options);
+        if(attestPref != null){
+            returnObjectBuilder.add(SKFSConstants.FIDO2_PREREG_ATTR_ATTESTATION, attestPref);
+        }
+        else{
+            attestPref = SKFSConstants.FIDO2_CONST_ATTESTATION_DIRECT;
+        }
+
+        JsonObject extensionsJson = generateExtensions(fidoPolicy.getExtensionsOptions(), extensions);
+        if (!extensionsJson.isEmpty()) {
+            returnObjectBuilder.add(SKFSConstants.FIDO2_PREAUTH_ATTR_EXTENSIONS, extensionsJson);
+        }
+
+        JsonObject returnObject = returnObjectBuilder.build();
+
+        //Store registration challenge info (TODO change UserSessionInfo to builder pattern)
+        String userVerificationReq = (authSelect != null) ? authSelect.getString(SKFSConstants.FIDO2_ATTR_USERVERIFICATION, null) : null;
+        UserSessionInfo session = new UserSessionInfo(username, challenge,
+                origin, SKFSConstants.FIDO_USERSESSION_REG, "", "");
+        session.setSid(applianceCommon.getServerId().shortValue());
+        session.setUserId(userId);
+        session.setDisplayName(displayName);
+        session.setRpName(rpname);
+        session.setSkid(applianceCommon.getServerId().shortValue());
+        session.setuserVerificationReq(userVerificationReq);
+        session.setAttestationPreferance(attestPref);
+        session.setPolicyMapKey(fidoPolicy.getPolicyMapKey());
+        skceMaps.getMapObj().put(SKFSConstants.MAP_USER_SESSION_INFO, nonceHash, session);
+        session.setMapkey(nonceHash);
+
+        //Replicate stored registration info
+        try {
+            if (applianceCommon.replicate()) {
+                replObj.execute(applianceConstants.ENTITY_TYPE_MAP_USER_SESSION_INFO, applianceConstants.REPLICATION_OPERATION_HASHMAP_ADD, applianceCommon.getServerId().toString(), session);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e.getLocalizedMessage());
+        }
+
+        SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, SKFSCommon.getMessageProperty("FIDO-MSG-0021"), " username=" + username);
+
+        String response = Json.createObjectBuilder()
+                .add(SKFSConstants.JSON_KEY_SERVLET_RETURN_RESPONSE, returnObject)
+                .build().toString();
+        SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, "FIDO-MSG-2001",
+                "FIDO 2.0 Response : " + response);
+        SKFSLogger.log(SKFSConstants.SKFE_LOGGER, Level.FINE, "FIDO-MSG-0035", "");
+        return response;
+    }
+
+    //TODO move private functions to be public functions of PolicyOption Objects
+    //Currently blocked by the need to move more objects to common.
+    private JsonObject generatePublicKeyCredentialRpEntity(RpPolicyOptions rpOp){
+        JsonObjectBuilder rpBuilder = Json.createObjectBuilder()
+                .add(SKFSConstants.FIDO2_ATTR_NAME, rpOp.getName());
+        if(rpOp.getId() != null)
+            rpBuilder.add(SKFSConstants.FIDO2_ATTR_ID, rpOp.getId());
+        if(rpOp.getIcon()!= null)
+            rpBuilder.add(SKFSConstants.FIDO2_ATTR_ICON, rpOp.getIcon());
+
+        return rpBuilder.build();
+    }
+
+    private JsonObject generatePublicKeyCredentialUserEntity(RegistrationPolicyOptions regOp,
+                                                             Long did, String username, String userId, String displayName, String userIcon) throws SKFEException {
+        JsonObjectBuilder userBuilder = Json.createObjectBuilder()
+                .add(SKFSConstants.FIDO2_ATTR_NAME, username)
+                .add(SKFSConstants.FIDO2_ATTR_ID, userId);
+
+
+        if((regOp.getDisplayName().equals(SKFSConstants.POLICY_CONST_REQUIRED)
+                || regOp.getDisplayName().equals(SKFSConstants.POLICY_CONST_PREFERRED))
+                && displayName != null){
+            userBuilder.add(SKFSConstants.FIDO2_ATTR_DISPLAYNAME, displayName);
+        }
+        else if((regOp.getDisplayName().equals(SKFSConstants.POLICY_CONST_PREFERRED)
+                && displayName == null) || regOp.getDisplayName().equals(SKFSConstants.POLICY_CONST_NONE)){
+            userBuilder.add(SKFSConstants.FIDO2_ATTR_DISPLAYNAME, username);
+        }
+        else{
+            throw new SKFEException(SKFSCommon.getMessageProperty("FIDO-MSG-0053") + "displayName");
+        }
+
+        return userBuilder.build();
+    }
+
+//    private String getUserId(Long did, String username, Integer useridLength, FidoKeys fk){
+////        FidoKeys fk = null;
+////        try {
+////            fk = getkeybean.getNewestKeyByUsernameStatus(did, username, "Active");
+////        } catch (SKFEException ex) {
+////            Logger.getLogger(generateFido2PreregisterChallenge.class.getName()).log(Level.SEVERE, null, ex);
+////        }
+//        if(fk == null){
+//            return (useridLength == null) ? U2FUtility.getRandom(SKFSConstants.DEFAULT_NUM_USERID_BYTES):
+//                    U2FUtility.getRandom(useridLength);
+//        }
+//        else{
+//            return fk.getUserid();
+//        }
+//    }
+
+    private String generateChallenge(AlgorithmsPolicyOptions cryptoOp){
+
+        int numBytes =  SKFSConstants.DEFAULT_NUM_CHALLENGE_BYTES;
+        return U2FUtility.getRandom(numBytes);
+    }
+
+    //TODO verify order is maintained
+    private JsonArray generatePublicKeyCredentialParametersArray(AlgorithmsPolicyOptions cryptoOp){
+        JsonArrayBuilder publicKeyBuilder = Json.createArrayBuilder();
+        //if policy set of EC signatures is set to 'all' then populate allowed EC signatures with all possible options
+        ArrayList<String> allowedECSignatures;
+        if (cryptoOp.getAllowedECSignatures().contains("all")){
+            allowedECSignatures = SKFSConstants.ALL_EC_SIGNATURES;
+        }
+        else {
+            allowedECSignatures = cryptoOp.getAllowedECSignatures();
+        }
+        for(String alg :allowedECSignatures){
+            JsonObject publicKeyCredential = Json.createObjectBuilder()
+                    .add(SKFSConstants.FIDO2_ATTR_TYPE, "public-key") //TODO fix this hardcoded assumption
+                    .add(SKFSConstants.FIDO2_ATTR_ALG, SKFSCommon.getIANACOSEAlgFromPolicyAlg(alg))
+                    .build();
+            publicKeyBuilder.add(publicKeyCredential);
+        }
+        //if policy set of RSA signatures is set to 'all' then populate allowed RSA signatures with all possible options
+        ArrayList<String> allowedRSASignatures;
+        if (cryptoOp.getAllowedRSASignatures().contains("all")){
+            allowedRSASignatures = SKFSConstants.ALL_RSA_SIGNATURES;
+        }
+        else {
+            allowedRSASignatures = cryptoOp.getAllowedRSASignatures();
+        }
+        //TODO fix this hardcoded assuption that EC is preferred over RSA
+        for (String alg : allowedRSASignatures) {
+            JsonObject publicKeyCredential = Json.createObjectBuilder()
+                    .add(SKFSConstants.FIDO2_ATTR_TYPE, "public-key") //TODO fix this hardcoded assumption
+                    .add(SKFSConstants.FIDO2_ATTR_ALG, SKFSCommon.getIANACOSEAlgFromPolicyAlg(alg))
+                    .build();
+            publicKeyBuilder.add(publicKeyCredential);
+        }
+        return publicKeyBuilder.build();
+    }
+
+    private JsonArray generateExcludeCredentialsList(RegistrationPolicyOptions regOp,
+                                                     Long did, String username, List<FidoKeys> fks) throws SKFEException{
+        JsonArrayBuilder excludeCredentialsBuilder = Json.createArrayBuilder();
+
+        if(regOp.getExcludeCredentials().equalsIgnoreCase(SKFSConstants.POLICY_CONST_ENABLED)){
+//            Collection<FidoKeys> fks = getkeybean.getByUsernameStatus(did, username, "Active");
+            for(FidoKeys fk: fks){
+                if(fk.getFidoProtocol().equals(SKFSConstants.FIDO_PROTOCOL_VERSION_2_0)){
+                    JsonObjectBuilder excludedCredential = Json.createObjectBuilder()
+                            .add(SKFSConstants.FIDO2_ATTR_TYPE, "public-key") //TODO fix this hardcoded assumption
+                            .add(SKFSConstants.FIDO2_ATTR_ID, decryptKH(fk.getKeyhandle()))
+                            .add(SKFSConstants.FIDO2_ATTR_ALG, RegistrationSettings
+                                    .parse(fk.getRegistrationSettings(), fk.getRegistrationSettingsVersion()).getAlg());
+
+                    //TODO transports are a hint that not all browsers support atm.
+//                    if(fk.getTransports() != null){
+//                        excludedCredential.add(SKFSConstants.FIDO2_ATTR_TRANSPORTS, SKFSCommon.getTransportJson(fk.getTransports().intValue()));
+//                    }
+
+                    excludeCredentialsBuilder.add(excludedCredential);
+                }
+            }
+        }
+        return excludeCredentialsBuilder.build();
+    }
+
+    private JsonObject generateAuthenticatorSelection(FidoPolicyObject fidoPolicy, JsonObject options){
+        JsonObject authselectResponse;
+        RegistrationPolicyOptions regOp = fidoPolicy.getRegistrationOptions();
+        JsonObject rpRequestedAuthSelect = options.getJsonObject(SKFSConstants.FIDO2_PREREG_ATTR_AUTHENTICATORSELECT);
+        JsonObjectBuilder authselectBuilder = Json.createObjectBuilder();
+        // Use RP requested options, assuming the policy allows.
+        if(rpRequestedAuthSelect != null){
+            String rpRequestedAttachment = rpRequestedAuthSelect.getString(SKFSConstants.FIDO2_ATTR_ATTACHMENT, null);
+            Boolean rpRequestedRequireResidentKey = SKFSCommon.handleNonExistantJsonBoolean(rpRequestedAuthSelect, SKFSConstants.FIDO2_ATTR_RESIDENTKEY);
+            String rpRequestedUserVerification = rpRequestedAuthSelect.getString(SKFSConstants.FIDO2_ATTR_USERVERIFICATION, null);
+
+            if(regOp.getAuthenticatorAttachment().contains(rpRequestedAttachment)){
+                authselectBuilder.add(SKFSConstants.FIDO2_ATTR_ATTACHMENT, rpRequestedAttachment);
+            }
+            else if(rpRequestedAttachment != null){
+                throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_ATTR_ATTACHMENT);
+            }
+
+            if (rpRequestedRequireResidentKey != null) {
+                if (regOp.getRequireResidentKey().contains(Boolean.toString(rpRequestedRequireResidentKey))) {
+                    authselectBuilder.add(SKFSConstants.FIDO2_ATTR_RESIDENTKEY, rpRequestedRequireResidentKey);
+                } else {
+                    throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_ATTR_RESIDENTKEY);
+                }
+            }
+
+            if(fidoPolicy.getUserVerification().contains(rpRequestedUserVerification)){
+                authselectBuilder.add(SKFSConstants.FIDO2_ATTR_USERVERIFICATION, rpRequestedUserVerification);
+            }
+            else if (rpRequestedUserVerification != null) {
+                throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_ATTR_USERVERIFICATION);
+            }
+        }
+        authselectResponse = authselectBuilder.build();
+        // If an option is unset, verify the policy allows for the default behavior.
+        if(!authselectResponse.isEmpty()){
+            if(authselectResponse.getString(SKFSConstants.FIDO2_ATTR_RESIDENTKEY, null) == null
+                    && !regOp.getRequireResidentKey().contains(SKFSConstants.POLICY_CONST_PREFERRED)){
+                throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_ATTR_RESIDENTKEY + "Missing");
+            }
+            if(authselectResponse.getString(SKFSConstants.FIDO2_ATTR_USERVERIFICATION, null) == null
+                    && !fidoPolicy.getUserVerification().contains(SKFSConstants.POLICY_CONST_PREFERRED)){
+                throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_ATTR_USERVERIFICATION + "Missing");
+            }
+            return authselectResponse;
+        }
+        return null;
+    }
+
+    private String generateAttestationConveyancePreference(AttestationPolicyOptions attOp, JsonObject options){
+        String attestionResponse = null;
+        String rpRequestedAttestation = options.getString(SKFSConstants.FIDO2_PREREG_ATTR_ATTESTATION, null);
+
+        // Use RP requested options, assuming the policy allows.
+        if(attOp.getAttestationConveyance().contains(rpRequestedAttestation)){
+            attestionResponse = rpRequestedAttestation;
+        }
+        else if(rpRequestedAttestation != null){
+            throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_PREREG_ATTR_ATTESTATION);
+        }
+
+        // If an option is unset, verify the policy allows for the default behavior.
+        if(attestionResponse == null && !attOp.getAttestationConveyance().contains(SKFSConstants.FIDO2_CONST_ATTESTATION_NONE)){
+            throw new SKIllegalArgumentException("Policy violation: " + SKFSConstants.FIDO2_PREREG_ATTR_ATTESTATION + "Missing");
+        }
+        return attestionResponse;
+    }
+
+    private JsonObject generateExtensions(ExtensionsPolicyOptions extOp, JsonObject extensionsInput){
+        JsonObjectBuilder extensionJsonBuilder = Json.createObjectBuilder();
+
+        for (Fido2Extension ext : extOp.getExtensions()) {
+            if (ext instanceof Fido2RegistrationExtension) {
+                JsonValue extensionInput = (extensionsInput == null) ? null
+                        : extensionsInput.get(ext.getExtensionIdentifier());
+
+                Object extensionChallangeObject = ext.generateChallengeInfo(extensionInput);
+                if (extensionChallangeObject != null) {
+                    if (extensionChallangeObject instanceof String) {
+                        extensionJsonBuilder.add(ext.getExtensionIdentifier(), (String) extensionChallangeObject);
+                    }
+                    else if (extensionChallangeObject instanceof JsonObject) {
+                        extensionJsonBuilder.add(ext.getExtensionIdentifier(), (JsonObject) extensionChallangeObject);
+                    }
+                    else if (extensionChallangeObject instanceof JsonValue) {
+                        extensionJsonBuilder.add(ext.getExtensionIdentifier(), (JsonValue) extensionChallangeObject);
+                    }
+                    else {
+                        throw new UnsupportedOperationException("Unimplemented Extension requested");
+                    }
+                }
+            }
+        }
+
+        return extensionJsonBuilder.build();
+    }
+
+    //TODO actually decrypt keyhandle if it is encrypted
+    private String decryptKH(String keyhandle){
+        return keyhandle;
+    }
+
+}
